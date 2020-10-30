@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <title>M5F9P Current Position</title>
+
+	<script src="https://maps.googleapis.com/maps/api/js?&key=$KEY"></SCRIPT>
+	<script type="text/javascript">
+		var gMap,crossMark,track;
+		var position = new google.maps.LatLng( $LAT, $LON );
+		var options = {
+			center: position,
+			zoom: 15,
+			mapTypeControl: true,
+			scrollwheel: true
+
+		};
+		var iconImage = {
+		    	url: 'image/cross32.gif',
+			size: new google.maps.Size(32,32),
+			anchor: new google.maps.Point(15,16)
+		};
+
+		var trackCoordinates = $TRK;
+
+		function onload(){
+			gMap = new google.maps.Map( document.getElementById('map'), options );		
+			crossMark = new google.maps.Marker({
+    			icon: iconImage,
+				position: position,
+				map: gMap
+			});
+			track = new google.maps.Polyline( {
+				path: trackCoordinates,
+				geodesic: true,
+				strokeColor: '#0000FF',
+				strokeOpacity: 1.0,
+				strokeWeight: 2,
+				map: gMap
+			} );
+			
+		}
+
+		function trackOnOff(){
+			track.setVisible( ! track.getVisible() );
+		}
+
+	</script>
+  </head>
+  <body onload="onload()">
+	<p>
+	<form>
+	Lat: $LAT (deg)<br>
+	Lon: $LON (deg)<br>
+	Height: $HGT (m)<br>
+	</p>
+	<input type="button" value="Track on/off" onClick="trackOnOff()">
+    <div id="map" style="width:800px; height:600px"></div>
+	</form>
+
+  </body>
+</html>
