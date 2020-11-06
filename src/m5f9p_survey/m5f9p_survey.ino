@@ -1,9 +1,13 @@
 /*
 
-          ************************************************************
-              u-blox ZED-F9Pモジュール on M5Stack  制御用プログラム
-          ************************************************************
+          ********************************************************************
+              [u-blox ZED-F9Pモジュール on M5Stack ] m5f9p 制御用プログラム
+              
+　　　　　              土地家屋調査士等の測量向けバージョン
+          ********************************************************************
 
+
+・ m5f9p main v1.0.16より派生
 
 ---------------- This file is licensed under the MIT License -------------------
 
@@ -57,9 +61,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 //                        モジュール変数
 // ************************************************************
 
-byte mVersionMajor = 1;
+char *mMyName = "m5f9p_survey";
+
+byte mVersionMajor = 0;
 byte mVersionMinor = 0;
-byte mVersionPatch = 16;
+byte mVersionPatch = 1;
 
 int mCpuFreqMHz;
 
@@ -221,18 +227,6 @@ struct stBaseSource {
 int mNumBaseSrc;
 struct stBaseSource mBaseSrc;		// 基準局データ受信先
 
-// 基準局座標
-#define BASE_POS_MAX 10
-struct stBasePosition {
-	bool valid;
-	char name[17];
-	double lat;
-	double lon;
-	double height;
-} mBasePosList[ BASE_POS_MAX ];
-int mNumBasePos;
-struct stBasePosition mBasePosition;
-
 int mSurveyinSec = 60;			// Survey in 秒数
 float mSurveyinAccuracy = 2;	// Survey in 精度（ｍ単位）
 
@@ -280,31 +274,10 @@ WiFiClient mWifiClient;
 char mBaseRecvBuff[ BASE_RECV_BUFF_MAX ];
 int mBaseRecvIdx;
 
-// 基準局データ送信用
-struct stCaster {
-	bool valid;
-	char address[64];
-	int port;
-	char mountPoint[32];
-	char password[32];
-} mCaster;
-
-
-
-#define NTRIP_SEND_BUFF_MAX 2048
-byte mNtripSendBuff[ NTRIP_SEND_BUFF_MAX ];
-int mNtripSendWriteIdx;
-int mNtripSendReadIdx;
-int mNtripSendCounter;
-
 #define MODEM920_SEND_BUFF_MAX 2048
 byte m920SendBuff[ MODEM920_SEND_BUFF_MAX ];
 int m920SendWriteIdx;
 int m920SendReadIdx;
-
-//#define NTRIP_RTK2GO 1
-//#define NTRIP_ALES 2
-//int mNtripCaster;
 
 int mBaseRecvCount;
 int mNripLastCount;
@@ -337,14 +310,6 @@ int mI2cReadIndex[RECEIVER_MAX];
 xSemaphoreHandle mMutexI2c;
 struct stI2cCommand mI2cCommand;
 int mI2cCommandTimeout = 100;		// msec
-
-// 基準局、Moving Base動作時 RTCMデータ配信用
-#define RTCM_BUFF_MAX 1024
-byte mRtcmBuff[ RTCM_BUFF_MAX ];
-int mRtcmIndex;
-bool mRtcmXferReady;
-
-int mServerCounter;		// 基準局データ配信回数
 
 // 接続されているGPS受信機の台数
 int mNumReceivers;
@@ -440,7 +405,6 @@ float mGyroY;
 float mGyroZ;
 
 
-// 
 
 
 // デバグ
@@ -482,6 +446,9 @@ void setup() {
 	
 	setSineCurve( 1000, 100 );
 	speakerOff();
+	
+	// プログラム名
+	sprintf( buff + strlen(buff), "%s\r\n", mMyName );
 
 	// バージョン
 	sprintf( buff + strlen(buff), "Version: %d.%d.%d\r\n", mVersionMajor, mVersionMinor, mVersionPatch );
@@ -688,16 +655,8 @@ j1:	gpsInit();
 	}
 
 	// 動作モード選択
-	if ( mRunMode == RUN_UI ) {
-		lcdClear();
-		lcdDispButtonText( 2, WHITE, "Rover", "Base", "MovBase" );
-		lcdDispText( 3, ">>> Select operation mode" );
-		mOpeMode = waitButton( ON, ON, ON, MODE_ROVER, MODE_BASE, MODE_MOVING_BASE );
-		mRunInfo.opeMode = mOpeMode;
-	}
-	else {
-		mOpeMode = mRunInfo.opeMode;
-	}
+	mOpeMode = MODE_ROVER;
+	mRunInfo.opeMode = mOpeMode;
 	
 	// GPS受信テスト及び日時取得
 	lcdClear();
@@ -851,81 +810,13 @@ j1:	gpsInit();
 			break;
 		
 		case MODE_BASE:
-			mRtcmXferReady = 0;
-			if ( mNetAccess == USE_MODEM_920 ){
-				nret = mFep01.setAddress( 1 );	// Base St. address = 1
-				if ( nret < 0 ){
-					lcdDispAndWaitButton( 3, "> Modem 920MHz set address error nret=%d\r\n", nret );
-				}
-			}
-			
-			if ( mRunMode == RUN_UI ){
-				if ( mNumBasePos ){
-					nret = basePosSelect();
-				}
-			
-				if ( nret == 1 && mBasePosition.valid ) {
-					nret = baseInit( 2, mBasePosition.lat, mBasePosition.lon, mBasePosition.height );
-				}
-				else nret = baseInit( 1, 0, 0, 0 );
-				if ( nret < 0 ){
-					if ( nret == -100 ){
-						lcdClear();
-						lcdDispText( 3, "Now resetting the GPS module." );
-						gpsReset( IF_UART );
-						delay(5000);
-						lcdClear();
-						goto j1;
-					}
-				
-					lcdDispText( 0, "Base station init error (%d)", nret );
-					dbgPrintf( "Base station init error nret=%d\r\n", nret );
-					while(1);
-				}
-				strncpy( mRunInfo.basePositionName, mBasePosition.name, RUN_INFO_STR_MAX - 1 );
-				mRunInfo.basePositionName[ RUN_INFO_STR_MAX - 1 ] = '\0';
-				mRunInfo.basePosition.lat = mBasePosition.lat;
-				mRunInfo.basePosition.lon = mBasePosition.lon;
-				mRunInfo.basePosition.height = mBasePosition.height;
-			}
-			else{
-				struct stPosition *p = & mRunInfo.basePosition;
-				int nDest = sizeof( mBasePosition.name ) - 1;
-				strncpy( mBasePosition.name, mRunInfo.basePositionName, nDest );
-				mBasePosition.name[ nDest ] = '\0';
-				mBasePosition.lat = p->lat;
-				mBasePosition.lon = p->lon;
-				mBasePosition.height = p->height;
-				mBasePosition.valid = true;
-				nret = baseInit( 2, p->lat, p->lon, p->height );
-			}
-			
-			// Ntrip選択
-//			mNtripSelected = ntripSelect( MODE_BASE, 0, 0 );
-			
-			mRtcmXferReady = 1;
-			nret = gpsSetUartPort( IF_UART, 1, mGpsUartBaudrate, 1, 1, 1, 0, 0, 1 );	// output RTCM only
-			
-			break;
-		
 		case MODE_MOVING_BASE:
-//			mOpeMode = MODE_ROVER;		// Ackを受信するため、暫定的に設定
-			nret = movingBaseInit();		
-//			mOpeMode = MODE_MOVING_BASE;
-			if ( nret < 0 ){
-				lcdDispText( 0, "Moving Base station init error (%d)", nret );
-				dbgPrintf( "Moving Base station init error nret=%d\r\n", nret );
-				while(1);
-			}
-			
+			lcdClear();
+			lcdDispText( 3, "!!! This operation mode(%d) not supported", mOpeMode );
+			while(1);
 			break;
 	}
 
-	// Bluetooth
-	if ( BT_ENABLE ){
-		if ( ! mBluetooth.begin( "M5Stack" ) ) dbgPrintf("Bluetooth init failed\r\n");
-	}
-	
 	// Server
 	mWifiServer = new WiFiServer( mServerPort );
 	if ( ! mWifiServer  ){
@@ -953,8 +844,6 @@ j1:	gpsInit();
 	mNripLastCountMillis = millis();
 	mBaseRecvIdx = 0;
 	mBaseSendReady = false;
-	mServerCounter = 0;
-	mNtripSendCounter = 0;
 	
 	mRunInfo.rebootMode = mRebootMode;
 	mRunInfo.saving = mFileSaving;
@@ -965,7 +854,7 @@ j1:	gpsInit();
 	lcdClear();
 	
 	// 移動局タスクスタート
-	if ( mOpeMode == MODE_ROVER || mOpeMode == MODE_MOVING_BASE ){
+	if ( true ){
 		// 移動局メインタスク（core 1）
 		xTaskCreatePinnedToCore( taskRover, "taskRover", taskStackSize, NULL, 1, NULL, 1 );
 
@@ -978,25 +867,6 @@ j1:	gpsInit();
 				xTaskCreatePinnedToCore(taskBaseRecv, "taskBaseRecv", taskStackSize, NULL, 1, NULL, 0);
 			}
 		}
-	}
-	// 基準局タスクスタート
-	else if ( mOpeMode == MODE_BASE && mNetAccess ){
-		// 基準局データ送信スタート(core 0)
-		nret = connectNtripAsServer();
-		if ( nret == 1 ){
-			mBaseSendReady = true;
-			mNtripSendWriteIdx = 0;
-			xTaskCreatePinnedToCore(taskNtripSend, "taskNtripSend", taskStackSize, NULL, 1, NULL, 0);
-			mRunInfo.baseSend = 1;
-		}
-	}
-
-	// 920MHzモデム送信スレッドスタート
-	if ( mNetAccess == USE_MODEM_920 && ( mOpeMode == MODE_BASE || mOpeMode == MODE_MOVING_BASE ) ){
-		m920SendReady = 1;
-		m920SendWriteIdx = 0;
-		m920SendReadIdx = 0;
-		xTaskCreatePinnedToCore(taskModem920Send, "taskModem920Send", 4096, NULL, 1, NULL, 0);
 	}
 	
 	// ボタン監視スレッドスタート
@@ -1020,11 +890,12 @@ j1:	gpsInit();
 //
 
 #define PAGE_MAIN 0
-#define PAGE_MAP 1
-#define PAGE_INFO 2
+#define PAGE_SURVEY 1
+#define PAGE_MAP 2
+#define PAGE_INFO 3
 
 int mLcdPage;		// 画面に表示するページ番号
-int mLcdPageMax = 3;	// 総ページ数
+int mLcdPageMax = 4;	// 総ページ数
 
 #define MAP_ROAD 0
 #define MAP_SAT 1
@@ -1035,11 +906,8 @@ unsigned long msecMapDisp;		// 地図が表示された時刻
 void loop() 
 {
 	int nret;
-//	M5.update();
-	if ( mOpeMode == MODE_BASE ) loopBase();
-	else loopRover();
-
-//if ( millis() - mStartMillis > 10000 ) ESP.restart();
+	
+	loopRover();
 
 	if ( mWebServer ) {		// ブラウザからの要求に対しては早く応答しないと正常に表示されない
 		mWebServer->handleClient();
@@ -1067,31 +935,15 @@ void nextPage()
 	lcdClear();
 }
 
-
-
-void loopBase(){
-
-	switch( mLcdPage ){
-		case PAGE_MAIN: 
-			dispBaseMainPage();
-			break;
-		case PAGE_MAP:
-			if ( ( ! mGoogleKey || strlen( mGoogleKey) == 0 ) ) mLcdPage++;
-			else dispMapMain();
-			break;
-		case PAGE_INFO:
-			dispInfo();
-			break;
-	}
-	
-}
-
 void loopRover()
 {
 
 	switch( mLcdPage ){
 		case PAGE_MAIN: 
 			dispRoverMainPage();
+			break;
+		case PAGE_SURVEY:
+			dispPointSurveyPage();
 			break;
 		case PAGE_MAP:
 			if ( mFileSaving ||  ( ! mGoogleKey || strlen( mGoogleKey) == 0 ) ) mLcdPage++;	// データ保存時は地図表示できない
@@ -1104,46 +956,272 @@ void loopRover()
 	
 }
 
+// 単点測量
+//
+// ファイル名：point_n_YYYYMMDD_HHMMSS.csv  n=その日の連番
+// 
+//
+char mSurveyPointPrefix = 'A';
+int mSurveyPointNum = 1;
+int mSurveyNumEpochs = 10;
+int mSurveyPositionErrorMax = 20;	// mm
+int mSurveyFileNum = 1;
+char mSurveyFilePath[64];
+String mSurveyDir = mRootDir + "/survey";
 
-void dispBaseMainPage()
+void dispPointSurveyPage()
 {
-	lcdDispButtonText( 2, WHITE, "", "", "NextPage", false );
-	lcdDispText( 1, " *** Base station ***" );
+	char buff[256];
+	char pointName[10];
+	int nret,lastMsec = 0;
+	bool lastFixed = false;
+
+	lcdClear();
+	lcdDispText( 2, "point survey mode\r\n" );	
+
+	// 高度を15度以上、衛星をGPS、GLONASS、Galileo?に設定（後で実装）＜＜＜＜＜＜＜＜＜＜
 	
-	if ( mBasePosition.valid ){
-		lcdDispText( 3, "name: %s", mBasePosition.name );
-		lcdDispText( 4, "lat: %.8f", mBasePosition.lat );
-		lcdDispText( 5, "lon: %.8f", mBasePosition.lon );
-		lcdDispText( 6, "height: %.3f", mBasePosition.height );
-	}
-	int colorIndex = mDisplayType * 4;
-	lcdTextColor24( mColor[ colorIndex + 0] );
-	if ( mNetAccess == USE_MODEM_920 ) lcdDispText( 7, " count = %d", m920SendCount );
-	else lcdDispText( 7, "count = %d (%d)", mServerCounter, mNtripSendCounter );
+	// ファイル番号
+	stGpsData* pGps = &mGpsData[0];
+	nret = surveyGetFileNumber( pGps->year, pGps->month, pGps->day );
+	if ( nret > 0 ) mSurveyFileNum = nret + 1;
+	else mSurveyFileNum = 1;
+	
+	mSurveyPointPrefix = 'A';
+	mSurveyPointNum = 1;
+	sprintf( pointName, "%c%03d", mSurveyPointPrefix, mSurveyPointNum );
+	while(1){
+		vTaskDelay(50);
+		if ( ! pGps->ubxDone ) continue;
+		int msec = ( pGps->hour * 3600 + pGps->minute * 60 + pGps->second ) * 1000 + pGps->msec;
+		int msecDiff = msec - lastMsec;
+		if ( msecDiff == 0 ) continue;
+		
+		lastMsec = msec;
+		bool fixed = msecDiff > 0 && msecDiff < 1100 && pGps->quality == 4;
+		
+		bool statusChanged = fixed != lastFixed;
+		lastFixed = fixed;
+		if ( statusChanged ) {
+			lcdClear();
+			lcdDispButtonText( 2, WHITE, "Start", "Stop", "Mode", false );
+		
+			// 点番号
+			lcdTextSize( 3 );
+			lcdDispText( 1, "File number: %d\r\n", mSurveyFileNum );
+			lcdDispText( 2, "Point name: %s\r\n", pointName ); 
+			lcdTextSize( 2 );
 
-	lcdTextColor24( mColor[ colorIndex + 1 ] );
-	lcdDispText( 8, "AP IP address:%u.%u.%u.%u", 
-					mSoftApIp[0], mSoftApIp[1], mSoftApIp[2], mSoftApIp[3] );
-	lcdDispText( 9, "port:%d", mServerPort );
+			// Fix状態
+			if ( fixed ) {
+				lcdTextColor( GREEN );
+				lcdDispText( 6, "Status: fixed\r\n\r\n>>> Press start button\r\n" );
+			}
+			else {
+				lcdTextColor( RED );
+				lcdDispText( 6, "Status: not fixed\r\n Wait until fix\r\n" );
+			}
+			lcdTextColor( WHITE );
+		}
 
-	if ( mNetAccess == USE_WIFI ){
-		lcdTextColor24( mColor[ colorIndex + 2 ] );
-		lcdDispText( 10, "IP address:%u.%u.%u.%u", 
-					mWifiLocalIp[0], mWifiLocalIp[1],mWifiLocalIp[2], mWifiLocalIp[3] );
-
-		if ( mBaseSendReady ){
-			lcdTextColor24( mColor[ colorIndex + 2 ] );
-			lcdDispText( 11, "NTRIP: %s", mCaster.address );
-			lcdDispText( 12, "mntpnt: %s", mCaster.mountPoint );
+		if ( buttonAPressed() ){
+			lcdClearLine( 6 );
+			nret = surveySavePoint( pointName );
+			if ( nret == 0 ){
+				mSurveyPointNum++;
+				sprintf( pointName, "%c%03d", mSurveyPointPrefix, mSurveyPointNum );
+			}
+		}
+		
+		if ( buttonCPressed() ) {
+			break;
 		}
 	}
-	lcdTextColor( WHITE );
+	lcdClear();
+	mLcdPage = PAGE_MAIN;
+}
 
-	delay(100);
+// 単点の座標を計測し保存する
+//
+// 戻り値＝0：正常終了
+//         -1:中止(Bボタンによる）
+//         -2以下：エラー
+//
+int surveySavePoint( char* pointName )
+{
+	struct stPosition position[2];
+	int nret;
+	char buff[256];
+
+	// 最初のセッション
+	int sessionNum = 1;
+	lcdDispText( 6, "Session=%2d\r\n", sessionNum );
+	nret = surveyGetPoint( &position[0] );
+	if ( nret == -1 ) return -1;
 	
+	// ２回以降のセッション
+	// 精度が良ければ２回のセッションで終了するが、精度が出なければ
+	// 連続したセッションで精度以内になるまで繰り返す。
+	while(1){
+		lcdDispText( 6, "Session=%2d\r\n", ++sessionNum );
+		nret = surveyGetPoint( &position[1] );
+		if ( nret == -1 ) return -1;
+		double distance = thomasDistance( position[0].lat, position[0].lon, 
+	                                  position[1].lat, position[1].lon );	
+		if ( distance > mSurveyPositionErrorMax / 1000.0 ) {
+			memcpy( &position[0], &position[1], sizeof( stPosition ) );
+			continue;
+		}
+		else break;
+	}
+	double lat = ( position[0].lat + position[1].lat ) / 2;
+	double lon = ( position[0].lon + position[1].lon ) / 2;
+	double height = ( position[0].height + position[1].height ) / 2;
+	
+	// ファイル保存
+	if ( strlen( mSurveyFilePath ) == 0 ) {
+		int i = 0;
+		int year = mGpsData[i].year;
+		int month = mGpsData[i].month;
+		int day = mGpsData[i].day;
+		int hour = mGpsData[i].hour;
+		int minute = mGpsData[i].minute;
+		int sec = mGpsData[i].second;
+
+		nret = surveySetFilePath( year, month, day, hour, minute, sec );
+	}
+	sprintf( buff, "%s,%.8lf,%.8lf,%.8lf\r\n", pointName, lat, lon, height );
+	nret = sdSave( mSurveyFilePath, buff, strlen( buff ) );
+	if ( nret < 0 ) return nret;
+	
+	return 0;
+}
+
+// １セッション（10エポック(既定値））の単点データを取得する
+//
+// 戻り値＝0：正常終了
+//         -1:中止(Bボタンによる）
+//         -2以下：エラー
+//
+int surveyGetPoint( struct stPosition* position )
+{
+	stGpsData* pGps = &mGpsData[0];
+	int count = 0;
+	double lat = 0;
+	double lon = 0;
+	double height = 0;
+	int lineNum = 8;
+	lcdClearLine( lineNum );
+	lcdDispText( lineNum, "num epochs = %d\r\n", count );
+	while(1){
+		if ( buttonBPressed() ){	// Cancel
+			lcdClearLine( lineNum );
+			return -1;
+		}
+		vTaskDelay(20);
+		if ( ! pGps->ubxDone ) continue;
+		if ( pGps->quality != 4 ) continue;
+		
+		lat += pGps->lat;
+		lon += pGps->lon;
+		height += pGps->height;
+		pGps->ubxDone = false;
+		count++;
+		lcdDispText( lineNum, "num epochs = %d\r\n", count );
+		if ( count == mSurveyNumEpochs ) break;
+	}
+	lcdClearLine( lineNum );
+	if ( count == 0 ) return -2;
+	position->lat = lat / count;
+	position->lon = lon / count;
+	position->height = height / count;
+	return 0;
+}
+
+// 単点測量の保存用ファイル名バッファ(mSurveySaveFileName)にファイル名をセットする。
+//
+int surveySetFilePath( int year, int month, int day, int hour, int minute, int sec )
+{
+	char buff[256];
+	const char *rootDir = mSurveyDir.c_str();
+	
+	int nret = surveyGetDirPath( year, month, day, buff, 256 );
+	if ( nret < 0 ) return -1;
+
+	nret = snprintf( mSurveyFilePath, 64, "%s/point_%d_%d%02d%02d_%02d%02d%02d.csv", 
+							buff, mSurveyFileNum, year, month, day, hour, minute, sec );
+	if ( nret >= 64 ) return -2;
+	return 0;
+}
+
+// 単点測量の保存用ファイルの番号を取得する。
+//
+// ・当日の測量用ディレクトリに格納されているファイルのうち最終の番号を取得する。
+//
+// 戻り値＝ファイル番号
+//         0:ファイルが無い
+//        負数：エラー
+//
+int surveyGetFileNumber( int year, int month, int day )
+{
+	int nret,number;
+	char buff[256];
+
+	nret = surveyGetDirPath( year, month, day, buff, 256 );
+	if ( nret < 0 ) return -1;
+	
+	File dir = SD.open( buff );
+	if ( ! dir ) return -2;
+
+	bool found = false;	
+	while(1){
+		File entry = dir.openNextFile();
+		if ( ! entry ) break;
+		if ( entry.isDirectory() ) continue;
+		const char *name = entry.name();
+		const char* p = strrchr( name, '/' );
+		if ( p == NULL ) p = name;
+		else p++;
+		nret = sscanf( p, "point_%d_", &number );
+		if ( nret == 1 ) {
+			found = true;
+			break;
+		}
+	}
+	dir.close();
+	if ( found ) return number;
+	return 0;
+}
+
+// 単点測量の保存用ディレクトリを取得する。
+//
+// ・年月日毎のディレクトリを無ければ作成し、そのパスを返す。
+//
+int surveyGetDirPath( int year, int month, int day, char* path, int pathLength )
+{
+	int nret;
+	const char *rootDir = mSurveyDir.c_str();
+
+	if ( ! SD.exists( rootDir ) ){
+		if ( ! SD.mkdir( rootDir ) ) {
+			dbgPrintf( "mkdir error: %s\r\n", rootDir );
+			return -1;
+		}
+	}
+
+	nret = snprintf( path, pathLength, "%s/%d%02d%02d", rootDir, year, month, day );
+	if ( nret >= pathLength ) return -2;
+	if ( ! SD.exists( path ) ){
+		if ( ! SD.mkdir( path ) ) {
+			dbgPrintf( "mkdir error: %s\r\n", path );
+			return -3;
+		}
+	}
+	return 0;
 }
 
 
+// 一般移動局画面
 void dispRoverMainPage() 
 {
 	int nret,numOutBytes,fifoTx,fifoRx;
@@ -1160,9 +1238,7 @@ void dispRoverMainPage()
 	while(1){
 		if ( i == mNumReceivers ) break;
 		int n = i + 1;
-		bool isMovingBase = mGpsRelPos[i].ubxDone && mGpsRelPos[i].flags & 0x20;	// 0x20:isMoving flag
-		if ( mGpsData[i].ubxDone && ! isMovingBase &&
-				( mOpeMode == MODE_ROVER || ( mOpeMode == MODE_MOVING_BASE && i == 0) ) ){
+		if ( mGpsData[i].ubxDone ){
 			updated = true;
 			int fix = 0;
 			if (mGpsData[i].quality == 4 ) fix = 2;
@@ -1185,21 +1261,6 @@ void dispRoverMainPage()
 			}
 //			mGpsData[i].ubxDone = false;
 		}
-		//if ( mGpsRelPos[i].ubxDone && i > 0 && mOpeMode == MODE_MOVING_BASE ){
-		if ( mGpsRelPos[i].ubxDone && mGpsRelPos[i].flags & 0x20 ){	// 0x20:isMoving flag
-			lcdTextColor24( mColor[ mDisplayType * 4 + i ] );
-			int fix = 0;
-			if (mGpsRelPos[i].quality == 4 ) fix = 2;
-			else if (mGpsRelPos[i].quality == 5 ) fix = 1;
-			lineStart = i * 4;
-			double elevation = atan2( -mGpsRelPos[i].down, mGpsRelPos[i].length ) * RAD2DEG;
-			lcdDispText( lineStart++, "LENGTH%d=%.3lfm     \r\n", n, mGpsRelPos[i].length );
-			lcdDispText( lineStart++, "HEADING%d=%.1lfdeg    \r\n", n, mGpsRelPos[i].heading);
-			lcdDispText( lineStart++, "ELEVATION%d=%.1lfdeg   \r\n", n, elevation );
-			lcdDispText( lineStart++, "FIX%d=%d  SPS%d=%d \r\n", n, fix, n, mSolutionRate);
-			lcdTextColor( WHITE );
-		}
-		
 		i++;
 	}
 //	lcdDispText( lineStart++, "%.3fm Az=%.2f El=%.2f\r\n", dist, azimuth,elevation);
@@ -1309,10 +1370,6 @@ int dispMapMain()
 	if ( ! mLcdMap ){
 		double centerLat = mGpsData[0].lat;
 		double centerLon = mGpsData[0].lon;
-		if ( mOpeMode == MODE_BASE ){
-			centerLat = mBasePosition.lat;
-			centerLon = mBasePosition.lon;
-		}
 		reload = true;
 
 		if ( mMapData.path.length() == 0 ) {
@@ -1898,77 +1955,6 @@ int wifiReconnect( char* ssid, char* password, int secTimeout)
 	}
 }
 
-
-// NTRIPキャスターへ基準局データを送信するスレッド
-//
-void taskNtripSend(void* param)
-{
-	int nret;
-	unsigned long msecLastTime = 0;
-	unsigned long msecReconnectStop = 0;
-	int reconnectCount = 0;
-	while(1)
-	{
-		vTaskDelay(1);
-				
-		if ( mBaseSendReady && mBaseSendClient ){
-			if ( ! mBaseSendClient->connected() ){
-				if ( mNetAccess == USE_WIFI ){
-					if ( WiFi.status() != WL_CONNECTED) {
-						nret = wifiReconnect( mSsid, mPassword, 10 );
-						if ( nret == -1 ){
-							dbgPrintf( "Wifi reconnect failed count=%d\r\n", reconnectCount );
-						}
-					}
-					if ( WiFi.status() != WL_CONNECTED) continue;
-				}
-
-				if ( reconnectCount > 10 ){	// 再接続が何回も続くとキャスタがIPをロックするので
-											// 再開まで１時間待つ
-					if ( msecReconnectStop ){
-						if ( millis() - msecReconnectStop > 3600 * 1000 ){
-							reconnectCount = 0;
-							msecReconnectStop = 0;
-						}
-					}
-					else msecReconnectStop = millis();
-					vTaskDelay(10000);
-					continue;
-				}
-				nret = mBaseSendClient->ntripServerConnect( mCaster.address, mCaster.port, 
-											mCaster.mountPoint, mCaster.password );
-				if ( nret != 0 ){
-					vTaskDelay(5000);
-					continue;
-				}
-				reconnectCount++;
-dbgPrintf("reconnect = %d\r\n",reconnectCount);
-			}
-			
-			int numSendBytes = mNtripSendWriteIdx - mNtripSendReadIdx;
-			if ( numSendBytes < 0 ) numSendBytes = NTRIP_SEND_BUFF_MAX - mNtripSendReadIdx;
-			if ( ! numSendBytes ) continue;
-		
-			nret = mBaseSendClient->write( mNtripSendBuff + mNtripSendReadIdx, numSendBytes, 1000 );
-			if ( nret != numSendBytes ){
-				dbgPrintf("Ntrip send error nret=%d\r\n", nret );
-			}
-			else{
-				reconnectCount = 0;
-				mNtripSendCounter++;
-				if ( mNtripSendCounter < 0 ) mNtripSendCounter = 0;
-dbgPrintf("Ntrip writed n=%d\r\n",numSendBytes);
-			}
-			mNtripSendReadIdx += numSendBytes;
-			if ( mNtripSendReadIdx >= NTRIP_SEND_BUFF_MAX ) mNtripSendReadIdx = 0;
-		}	
-		else {
-			vTaskDelay(100);
-			continue;
-		}
-	}
-}
-
 // 920MHzモデムにより基準局データを受信するスレッド
 //
 void taskModem920Recv(void* param)
@@ -1983,40 +1969,6 @@ void taskModem920Recv(void* param)
 			m920TotalBytes += receivedBytes;
 		}
 		vTaskDelay(10);
-	}
-}
-
-// 920MHzモデムにより基準局データを送信するスレッド
-//
-void taskModem920Send(void* param)
-{
-	int nret;
-	unsigned long msecLastTime = 0;
-	while(1)
-	{
-		vTaskDelay(10);
-				
-		if ( m920SendReady ){
-			int numSendBytes = m920SendWriteIdx - m920SendReadIdx;
-			if ( numSendBytes < 0 ) numSendBytes = MODEM920_SEND_BUFF_MAX - m920SendReadIdx;
-			if ( ! numSendBytes ) continue;
-//dbgPrintf("920 send start\r\n");
-//unsigned long msecStart=millis();
-			nret = mFep01.send( 2, (char*) m920SendBuff + m920SendReadIdx, numSendBytes, true );
-			if ( nret != numSendBytes ){
-				dbgPrintf("Modem 920MHz send error in=%d out=%d\r\n", mRtcmIndex, nret);
-			}
-			m920SendReadIdx += numSendBytes;
-			if ( m920SendReadIdx >= MODEM920_SEND_BUFF_MAX ) m920SendReadIdx = 0;
-//int msec = millis() - msecStart;
-//int bps = numSendBytes * 1000 *8 / msec;
-//dbgPrintf("920 send bytes=%d  time=%dmsec speed=%dbps\r\n",numSendBytes,msec,bps);
-
-		}	
-		else {
-			vTaskDelay(100);
-			continue;
-		}
 	}
 }
 
@@ -2047,83 +1999,7 @@ void taskGetSensorData(void* param)
 		// メイン受信機からのデータをUARTで取得する
 		int numBytesToRead = Serial1.available();
 		if ( numBytesToRead > 0 ){
-			// 基準局の場合
-			if ( (mOpeMode == MODE_BASE && mRtcmXferReady) || mOpeMode == MODE_MOVING_BASE ){
-				
-				// データの取得
-				// msecTimeoutの時間内に受信したデータをバッファに格納
-				unsigned long msecStart = millis();
-				int msecTimeout = 100;	// 100msec程度ないとPH UART送信時にエラーとなる
-				if ( mOpeMode == MODE_MOVING_BASE ) msecTimeout = 60;
-				mRtcmIndex = 0;
-				while( (millis() - msecStart) < msecTimeout ){
-					if ( numBytesToRead > 0 ){
-						if ( numBytesToRead + mRtcmIndex > RTCM_BUFF_MAX ) 
-									numBytesToRead = RTCM_BUFF_MAX - mRtcmIndex;
-						numSavedBytes = Serial1.readBytes( mRtcmBuff + mRtcmIndex, numBytesToRead );
-						mRtcmIndex += numSavedBytes;
-						if ( mRtcmIndex >= RTCM_BUFF_MAX ) break;
-					}
-					vTaskDelay(1);
-					numBytesToRead = Serial1.available();
-				}
-				
-				mServerCounter++;
-
-				// TCP転送用バッファにコピー
-				if ( mWifiServer ){
-					int residue = mRtcmIndex;
-					byte* pRead = mRtcmBuff;
-					while( residue > 0 ){
-						int n = residue;
-						if ( mServerWriteIndex + n > SERVER_BUFF_MAX )
-							n = SERVER_BUFF_MAX - mServerWriteIndex;
-						memcpy( mServerBuff + mServerWriteIndex, pRead, n );
-						mServerWriteIndex += n;
-						pRead += n;
-						if ( mServerWriteIndex >= SERVER_BUFF_MAX ) mServerWriteIndex = 0;
-						residue -= n;
-					}
-				}
-				
-				// NTRIP送信用バッファにコピー
-				if ( mBaseSendReady ){
-					ringBuffCopy( mRtcmBuff, mRtcmIndex, mNtripSendBuff, 
-													&mNtripSendWriteIdx, NTRIP_SEND_BUFF_MAX );
-				}
-				
-				// Moving Baseの場合はPVTを取り出しバッファに格納
-				if ( mOpeMode == MODE_MOVING_BASE ){
-					int decodedBytes;
-					nret = ubxBuffDecode( mRtcmBuff, mRtcmIndex, &mUbxStatus[0], &decodedBytes );
-				}
-				
-				// 920MHzモデムが接続されている場合は920MHz送信用バッファにコピー
-				if ( mNetAccess == USE_MODEM_920 && m920SendReady ){
-					ringBuffCopy( mRtcmBuff, mRtcmIndex, m920SendBuff, 
-													&m920SendWriteIdx, MODEM920_SEND_BUFF_MAX );
-					m920SendCount++;
-dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
-//					nret = mFep01.send( 2, (char*) mRtcmBuff, mRtcmIndex );
-//					m920SendCount++;
-//					if ( nret != mRtcmIndex ){
-//						dbgPrintf("Modem 920MHz send error in=%d out=%d\r\n", mRtcmIndex, nret);
-//					}
-				}
-
-				// 補正データをサブ受信機に配信
-				if ( mNumI2cReceivers ){
-					nret = gpsWrite( IF_UART, (char *)mRtcmBuff, mRtcmIndex );
-					if ( nret != mRtcmIndex ){
-						dbgPrintf("gpsWrite() error in=%d out=%d\r\n", mRtcmIndex, nret);
-					}
-				}
-				
-				// シリアルポートからの配信
-				if ( mDebugPort != DEBUG_PH )phUartWriteBytes( mRtcmBuff, mRtcmIndex );
-
-			}
-			else {	// 移動局の場合
+			if ( true ) {	// 移動局の場合
 				unsigned long msecStart = millis();
 				int msecTimeout = 100;
 				while ( numBytesToRead ){
@@ -2539,58 +2415,6 @@ int readIniFile( IniFile *iniFile )
 		
 	// Server 基準局または移動局データ配信ポート
 	mServerPort = iniFile->readInt( "server", "port", mServerPort );
-
-	// NTRIP Caster 基準局データ送信先
-	strcpy( section, "caster" );
-	mCaster.valid = false;
-	for( int i=0; i < 1; i++ ){
-		nret = iniFile->readValue( section, "address", buff, 256 );
-		if ( nret < 0 || strlen(buff) > 64) continue;
-		strcpy( mCaster.address, buff );
-
-		int port = iniFile->readInt( section, "port", 2101 );
-		mCaster.port = port;
-
-		nret = iniFile->readValue( section, "mount", buff, 256 );
-		if ( nret < 0 || strlen(buff) > 32) continue;
-		strcpy( mCaster.mountPoint, buff );
-		
-		nret = iniFile->readValue( section, "password", buff, 256 );
-		if ( strlen(buff) > 32 || nret < 0 ) strcpy( buff, "" );
-		strcpy( mCaster.password, buff );
-		
-		mCaster.valid = true;
-	}
-	
-	// 基準局座標
-	strcpy( section, "base" );
-	mNumBasePos = 0;
-	for( int i=0; i < BASE_POS_MAX; i++ ){
-		sprintf( section, "base%d", i );
-
-		nret = iniFile->readValue( section, "name", buff, 256 );
-		buff[16] = '\0';
-		strcpy( mBasePosList[ mNumBasePos ].name, buff );
-
-		double lat = iniFile->readDouble( section, "lat", 100 );
-		if ( lat < -90 || lat > 90 ) continue;
-		mBasePosList[ mNumBasePos ].lat = lat;
-
-		double lon = iniFile->readDouble( section, "lon", 200 );
-		if ( lon < -180 || lon > 180 ) continue;
-		mBasePosList[ mNumBasePos ].lon = lon;
-
-		double height = iniFile->readDouble( section, "height", -100 );
-		if ( height < 0 ) continue;
-		mBasePosList[ mNumBasePos ].height = height;
-
-		mNumBasePos++;
-	}
-	
-	// Survey-in パラメータ
-	strcpy( section, "surveyin" );
-	mSurveyinSec = iniFile->readInt( section, "period", mSurveyinSec );
-	mSurveyinAccuracy = iniFile->readDouble( section, "accuracy", mSurveyinAccuracy );
 
 	// Google key
 	nret = iniFile->readValue( "google", "key", buff, 256 );
@@ -3227,222 +3051,6 @@ int baseSrcSelect_iniFile()
 	return 0;
 }
 
-// 基準局の座標値を選択する
-//
-// 戻り値＝ 1: 選択済
-//          0: 未選択
-//
-int basePosSelect()
-{
-	char buff[256];
-	int nret,color;
-	if ( mNumBasePos == 0 ) return 0;
-	
-	lcdClear();
-	int command = CANCEL;
-	int idx = 0;
-	if ( mNumBasePos == 1 ) command = OK;
-	else {
-		lcdDispButtonText( 2, WHITE, "Next", "Ok", "SurveyIn" );
-		lcdDispText( 1, ">>> Select position of base station" );
-		int lineOffset = 3;
-		for( int i=0; i < mNumBasePos; i++ ){
-			sprintf( buff, "%d %s %.8f", i+1, mBasePosList[i].name, mBasePosList[i].lat );
-			if ( i == 0 ) color = GREEN;
-			else color = WHITE;
-			lcdTextColor( color );
-			lcdDispText( i + lineOffset, buff );
-		}
-		while(1){
-			command = waitButton( 1, 1, 1, NEXT, OK, CANCEL );
-			if ( command == NEXT ){	// next item
-				if ( mNumBasePos == 1 ) continue;
-				sprintf( buff, "%d %s %.8f", idx+1, mBasePosList[idx].name, mBasePosList[idx].lat );
-				lcdTextColor( WHITE );
-				lcdDispText( idx + lineOffset, buff );
-
-				idx++;
-				if ( idx == mNumBasePos ) idx = 0;
-				sprintf( buff, "%d %s %.8f", idx+1, mBasePosList[idx].name, mBasePosList[idx].lat );
-				lcdTextColor( GREEN );
-				lcdDispText( idx + lineOffset, buff );
-				continue;
-			}
-			else {
-				break;
-			}
-		}
-		lcdClear();
-		lcdTextColor( WHITE );
-	}
-	if ( command == CANCEL ) return 0;
-	
-	memcpy( (void*) &mBasePosition, (void*) &mBasePosList[ idx ], sizeof( mBasePosition ) );
-
-	lcdClear();
-	lcdDispText( 3, ">>> Do you use this position ?" );
-	lcdDispText( 5, "name: %s", mBasePosition.name );
-	lcdDispText( 6, "lat: %.8f", mBasePosition.lat );
-	lcdDispText( 7, "lon: %.8f", mBasePosition.lon );
-	lcdDispText( 8, "height: %.3f", mBasePosition.height );
-	lcdDispButtonText( 2, WHITE, "Yes", "No", "" );
-	int yes = waitButton( 1, 1, 0, YES, NO, 0 );
-	if ( yes ) {
-		mBasePosition.valid = true;
-		return 1;
-	}
-
-	return 0;
-}
-
-
-// GPS受信機を基準局として初期化
-//
-// 基準局にできるのはシリアル接続の受信機のみ
-//
-// mode= 1: 座標を自動設定。degLat,degLon,mHeightは使用しない。
-//       2: 座標を数値で指定。
-//
-// 戻り値= 0:正常終了
-//        負数:エラー
-//        -100: survey-inが中断され、再開できないのでZED-F9Pをリセットする必要がある。
-//
-int baseInit( int mode, double degLat, double degLon, double mHeight )
-{
-	int nret;
-	double x,y,z,lat,lon,height;
-	int secObservation = 0;
-	float mrAccuracy = 0;
-	struct stUbxStatus ubxStatus;
-	memset( &ubxStatus, 0, sizeof(ubxStatus) );
-
-	// output disable:NMEA  enable:UBX,RTCM3
-	nret = gpsSetUartPort( IF_UART, 1, mGpsUartBaudrate, 1, 1, 1, 1, 0, 1 );
-	if ( nret < 0 ) return -1;
-
-	if ( mode == 1 ) degLat = degLon = mHeight = 0;
-
-j1:
-	nret = gpsSetBaseCoordinate( IF_UART, mode, degLat, degLon, mHeight,
-					mSurveyinSec, mSurveyinAccuracy );
-	if ( nret < 0 ) return -2;
-
-	int retCode = 0;
-	if ( mode == 1 ){ // surveyin
-		nret = gpsSetMessageRate( IF_UART, 0x01, 0x3b, 1 );	// output Survey-in data
-		if ( nret < 0 ) return -3;
-j2:		lcdDispText( 1, "*** Survey-in status ***" );
-		lcdDispButtonText( 2, WHITE, "", "Cancel", "" );
-		x = y = z = 0;
-		buttonPressedReset();
-		while(1){
-			if ( buttonPressed() == BUTTON_B ){	// canceled
-				lcdClear();
-				lcdDispText( 3, "> Use current mean value ?" );
-				gpsEcef2Llh( x, y, z, &lat, &lon, &height );
-				lcdDispText( 5, "lat: %.8f", lat );
-				lcdDispText( 6, "lon: %.8f", lon );
-				lcdDispText( 7, "height: %.3f", height );
-
-				lcdDispText( 9, "accuracy: %.3fm", mrAccuracy );
-				
-				lcdDispButtonText( 2, WHITE, "Yes", "No", "" );
-				int yes = waitButton( 1, 1, 0, YES, NO, 0 );
-				lcdClear();
-				if ( yes ) {
-					nret = 1;
-					break;
-				}
-				else goto j2;
-			}
-			nret = ubxDecode( IF_UART, &ubxStatus );
-			if  (nret < 0 ) {
-				continue;
-			}
-			if ( ubxStatus.statusNum == 10 ){
-//dbgPrintf("msgClass=%x id=%x\r\n",ubxStatus.msgClass, ubxStatus.msgId );
-				if ( ubxStatus.msgClass != 0x01 || ubxStatus.msgId != 0x3b ){
-					ubxStatus.statusNum = 0;
-					continue;
-				}
-			}
-			else {
-				delay(1);
-				continue;
-			}
-			
-			nret = ubxDecodeNavSvin( &ubxStatus, &secObservation, &mrAccuracy, &x, &y, &z );
-			if ( nret < 0 ) {
-				dbgPrintf("NavSvin error nret=%d\r\n",nret);
-				return -100;
-			}
-			dbgPrintf("Survey in period=%dsec accuracy=%.3fm\r\n", secObservation, mrAccuracy );
-			lcdDispText( 3, "Observation period : %dsec", secObservation );
-			lcdDispText( 4, "Accuracy : %.3fm          ", mrAccuracy );
-			if ( nret == 1 ) break;
-			delay(500);
-			
-		}
-		if ( nret == 1 ){
-			gpsEcef2Llh( x, y, z, &mBasePosition.lat, &mBasePosition.lon, &mBasePosition.height );
-			strcpy( mBasePosition.name, "survey-in" );
-			mBasePosition.valid = true;
-			lcdDispText( 6, "Survey-in normally end." );
-			lcdDispText( 8, "Press any button." );
-			lcdDispButtonText( 2, WHITE, "", "", "" );
-			waitButton();
-		}
-		nret = gpsSetMessageRate( IF_UART, 0x01, 0x3b, 0 );  // stop Survey-in data
-		lcdClear();
-	}
-	
-	// RTCM message
-	nret = gpsSetRtcmMessage( IF_UART );
-	if ( nret < 0 ) retCode = -11;
-	
-	return retCode;
-}
-
-// Moving Base mode
-int movingBaseInit()
-{
-	int nret;
-	// input ubx:1 nmea:0 rtcm:0
-	// output ubx:1 nmea:0 rtcm:1
-	nret = gpsSetUartPort( IF_UART, 1, mGpsUartBaudrate, 1, 0, 0, 1, 0, 1 );
-	if ( nret < 0 ) return -1;
-
-	// RTCM message
-dbgPrintf("moving base 0xF5 0x4d\r\n");
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x4D, 1 );	// RTCM3.3 1077 GPS MSM7
-	if ( nret < 0 ) return -2;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x57, 1 );	// RTCM3.3 1087 GLONASS MSM7
-	if ( nret < 0 ) return -3;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x61, 1 );	// RTCM3.3 1097 Galileo MSM7
-	if ( nret < 0 ) return -4;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x7F, 1 );	// RTCM3.3 1127 BeiDou MSM7
-	if ( nret < 0 ) return -5;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0xE6, 1 );	// RTCM3.3 1230 GLONASS code-phase biases
-	if ( nret < 0 ) return -6;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0xFE, 1 );	// RTCM3.3 4072-0 Reference station PVT
-	if ( nret < 0 ) return -7;
-	nret = gpsSetMessageRate( IF_UART, 0xF5, 0xFD, 1 );	// RTCM3.3 4072-1 Additional reference station information
-	if ( nret < 0 ) return -8;
-
-	for( int i=1; i < mNumReceivers; i ++ ){
-		int i2cAddress = mReceiverType[i];
-		if ( i2cAddress ){
-			for( int j=0; j < 3; j++ ){
-				nret = gpsSetMessageRate( i2cAddress, 0x01, 0x3c, 1 );	// NAV-RELPOSNED
-				if ( nret == 0 ) break;
-			}
-		}
-
-	}
-
-	return 0;
-}
-
 int gpsSetRtcmMessage( int interface )
 {
 	// RTCM message
@@ -3760,87 +3368,6 @@ dbgPrintf("connectBaseSource: nret=%d  src=%s\r\n",nret, mBaseSrc.address );
 	else return -4;
 }
 
-// NTRIP ServerとしてCasterに接続する
-//
-// 戻り値＝ 1: 接続完了
-//          0: 未接続
-//         -1: パスワードエラー
-//
-int connectNtripAsServer()
-{
-	int nret,yes;
-	
-	lcdClear();
-	if ( ! mCaster.valid ) {
-		return 0;
-	}
-	else {
-		if ( mRunMode == RUN_UI ){
-			lcdDispText( 3, "> Do you connect to NTRIP caster ?" );
-			lcdDispText( 5, "   caster: %s", mCaster.address );
-			lcdDispText( 6, "   mount point: %s", mCaster.mountPoint );
-			lcdDispButtonText( 2, WHITE, "Yes", "No", "" );
-			yes = waitButton( 1, 1, 0, YES, NO, 0 );
-			lcdClear();
-		}
-		else {
-			yes = mRunInfo.baseSend;
-		}
-		if ( !yes ) return 0;
-	}
-	
-	if ( mNetAccess == USE_WIFI ) mBaseSendClient = new TcpClient( &mWifiClient );
-	else if ( mNetAccess == USE_MODEM_3G ) mBaseSendClient = new TcpClient( &mGsmClient );
-	else return -2;
-	
-	mBaseSendClient->setAgentName( mNtripServerName );
-	dbgPrintf("Connecting to NTRIP caster\r\n");
-	bool connected = false;
-	if ( mNetAccess > 0 ){
-		while(1){
-			lcdClear();
-			lcdDispText( 3, "Connecting to NTRIP caster");
-			for( int i=0; i < 3; i++ ){
-				nret = mBaseSendClient->ntripServerConnect( mCaster.address, mCaster.port, 
-											mCaster.mountPoint, mCaster.password );
-
-				if ( nret == 0 ) {
-					connected = true;
-					break;
-				}
-				else if ( nret >= -2 ) continue;	// 接続、転送エラーなのでリトライ
-				else if ( nret == -3 ){	// パスワードエラー
-					if ( mRunMode == RUN_UI ){
-						lcdDispAndWaitButton( 3, "Can't connect to NTRIP caster. ( Bad Password )" );
-					}
-					return -1;
-				}
-				else break;
-			}
-			if ( connected ) break;
-			if ( mRunMode == RUN_UI ){
-				lcdDispText( 5, "> Can't connect.(%d)", nret );
-				lcdDispButtonText( 2, WHITE, "Retry", "Cancel", "" );
-				lcdDispText( 8, ">>> Do you retry ?" );
-				int nret = waitButton( 1, 1, 0, 1, 0, 0 );
-				if ( nret == 0 ) break;
-			}
-		}
-		if ( connected ){
-			dbgPrintf("Ntrip OK. host=%s  mount point=%s\r\n", mCaster.address, mCaster.mountPoint);
-			if ( mRunMode == RUN_UI ){
-				lcdClear();
-				lcdDispText( 3, "> Connected to NTRIP caster" );
-				lcdDispText( 5, "  Caster: %s\r\n  Mountpoint:%s", mCaster.address, mCaster.mountPoint );
-				lcdDispText( 10, ">>> Press any button" );
-				waitButton();
-			}
-		}
-		lcdClear();
-	}
-	if ( connected ) return 1;
-	else return 0;
-}
 
 // ************************************************************
 //                         時刻
@@ -4051,13 +3578,7 @@ void webHandleOnMap()
 
 	if ( ! mWebServer ) return;
 
-	if ( mOpeMode == MODE_BASE ){
-		sprintf( latStr, "%.8f", mBasePosition.lat );
-		sprintf( lonStr, "%.8f", mBasePosition.lon );
-		sprintf( heightStr, "%.3f", mBasePosition.height );
-		
-	}
-	else {
+	if ( true ) {
 		double lat = mGpsData[0].lat;
 		sprintf( latStr, "%.8f", lat );
 		double lon = mGpsData[0].lon;
@@ -4480,7 +4001,6 @@ int sdRead( const char *fileName, char *buff, int numBytes )
 	if ( nret == -1 ) return 0;
 	return nret;
 }
-
 
 // 実行パラメータを保存する
 //
