@@ -59,7 +59,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 byte mVersionMajor = 1;
 byte mVersionMinor = 0;
-byte mVersionPatch = 16;
+byte mVersionPatch = 17;
 
 int mCpuFreqMHz;
 
@@ -427,8 +427,8 @@ int mDisplayType = 0;		// M5Stackのロットにより色が違う機種があ�
 char mReceiverName[16] = "m5f9p";		// AP名として使用
 
 // IMU
-//bool mUseImu = false;
-bool mUseImu = true;
+bool mUseImu = false;
+//bool mUseImu = true;
 unsigned long mImuLastRead = 0;
 
 float mAccelX;
@@ -1578,6 +1578,28 @@ if ( i == 0 ){
 							if ( nret < 0 ) dbgPrintf("agribus connect error nret=%d\r\n",nret);
 						}
 					}
+					
+					// 相対位置の計算
+					if ( ( mOpeMode != MODE_MOVING_BASE) && ( i == 1 ) ){
+						struct stGpsData *pd0 = &mGpsData[0];
+						struct stGpsData *pd1 = &mGpsData[1];
+						float secDiff = ( pd1->hour * 3600 + pd1->minute * 60 + pd1->second + pd1->msec / 1000.0 ) - ( pd0->hour * 3600 + pd0->minute * 60 + pd0->second + pd0->msec / 1000.0 );
+						int msecDiff = secDiff * 1000;
+//dbgPrintf("msecDiff=%d\r\n",msecDiff);
+						bool sameTimes = abs( msecDiff ) < ( 500 / mSolutionRate ) ;
+						if ( sameTimes ){
+							getPosVector( &mGpsData[0], &mGpsData[1], &x, &y, &z );
+							float dist = sqrt( x * x + y * y + z * z );
+							float azimuth = -1;
+							float elevation = -1;
+							if ( dist > 0.02 ){
+								azimuth = atan2( y, x ) * RAD2DEG;
+								if ( azimuth < 0 ) azimuth += 360;
+								elevation = (atan2( z, sqrt(x * x + y * y) )) * RAD2DEG;
+							}
+//dbgPrintf("dist=%f azimuth=%f elevation=%f\r\n",dist,azimuth,elevation );
+						}
+					}
 
 					//mGpsData[i].ubxDone = false;
 				}
@@ -1599,35 +1621,6 @@ if ( i == 0 ){
 			mUbxStatus[i].statusNum = 0;
 		}
 
-if (false){
-		// アンテナ間ベクトル
-		if ( updated && mNumI2cReceivers){
-			bool sameTimes = true;
-			struct stGpsData* pGpsData0 = &mGpsData[0];
-			// Moving Baseの場合で、サブ受信機のデータは１回前のデータなので、
-			// メインのデータも１回前のデータを使う
-			if ( mOpeMode == MODE_MOVING_BASE  ) pGpsData0 = &mGpsDataLast;
-			for (int j=1; j < mNumReceivers; j++){
-				float secDiff = gpsDate2UnixTime( &mGpsData[j] ) - gpsDate2UnixTime( pGpsData0 );
-				if ( abs(secDiff) * 1000 >= ( 500 / mSolutionRate ) ) {
-					sameTimes = false;
-					break;
-				}
-			}
-			if ( sameTimes ){
-				getPosVector( pGpsData0, &mGpsData[1], &x, &y, &z );
-				float dist = sqrt( x * x + y * y + z * z );
-				float azimuth = -1;
-				float elevation = -1;
-				if ( dist > 0.02 ){
-					azimuth = atan2( y, x ) * RAD2DEG;
-					if ( azimuth < 0 ) azimuth += 360;
-					elevation = (atan2( z, sqrt(x * x + y * y) )) * RAD2DEG;
-				}
-			}
-		}
-}
-		
 		mWifiConnected =  (WiFi.status() == WL_CONNECTED) ;
 		
 		//BT
@@ -1640,6 +1633,7 @@ if (false){
 	else vTaskDelay(5);
 	goto j1;
 }
+
 
 // SDカードにデータを保存するスレッド
 //
@@ -1913,6 +1907,7 @@ void taskNtripSend(void* param)
 				
 		if ( mBaseSendReady && mBaseSendClient ){
 			if ( ! mBaseSendClient->connected() ){
+dbgPrintf("Ntrip reconnect start\r\n");
 				if ( mNetAccess == USE_WIFI ){
 					if ( WiFi.status() != WL_CONNECTED) {
 						nret = wifiReconnect( mSsid, mPassword, 10 );
@@ -1952,6 +1947,10 @@ dbgPrintf("reconnect = %d\r\n",reconnectCount);
 			nret = mBaseSendClient->write( mNtripSendBuff + mNtripSendReadIdx, numSendBytes, 1000 );
 			if ( nret != numSendBytes ){
 				dbgPrintf("Ntrip send error nret=%d\r\n", nret );
+				if ( nret == -1 ){	// timeoutの時は再接続
+					mBaseSendClient->stop();
+					dbgPrintf("mBaseSendClient stopped\r\n");
+				}
 			}
 			else{
 				reconnectCount = 0;
