@@ -59,7 +59,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 byte mVersionMajor = 1;
 byte mVersionMinor = 0;
-byte mVersionPatch = 17;
+byte mVersionPatch = 18;
 
 int mCpuFreqMHz;
 
@@ -339,12 +339,19 @@ struct stI2cCommand mI2cCommand;
 int mI2cCommandTimeout = 100;		// msec
 
 // 基準局、Moving Base動作時 RTCMデータ配信用
-#define RTCM_BUFF_MAX 1024
+#define RTCM_BUFF_MAX 2048
 byte mRtcmBuff[ RTCM_BUFF_MAX ];
 int mRtcmIndex;
 bool mRtcmXferReady;
 
 int mServerCounter;		// 基準局データ配信回数
+
+// Moving Base動作時、TCP serverとして配信するデータ内容
+#define MB_RTCM 0
+#define MB_NMEA 1
+int mMBTcpServerFormat;
+
+bool mMBReady = false;	// Moving Baseとしての動作を開始する場合True
 
 // 接続されているGPS受信機の台数
 int mNumReceivers;
@@ -354,6 +361,7 @@ int mNumI2cReceivers;
 unsigned long mGpsLastMillis;
 int mSolutionRate;
 int mGpsUartBaudrate = 230400;		// 460800,230400,115200,57600,38400,19200,9600
+//int mGpsUartBaudrate = 460800;		// 460800,230400,115200,57600,38400,19200,9600
 
 int mI2cUartSyncMode;		// I2Cのデータ読み出しをUARTに同期させる場合 true
 
@@ -451,7 +459,7 @@ int mDebugPort;
 char *mGoogleKey;
 
 // test
-int mPinTest = 16;
+int mPinTest = 17;
 
 
 // ************************************************************
@@ -531,6 +539,7 @@ void setup() {
 
 	// test
 	pinMode( mPinTest, OUTPUT);
+	digitalWrite( mPinTest, LOW);
 	
 	// gps enable
 	pinMode( mPinGpsReset, OUTPUT);
@@ -734,7 +743,7 @@ j1:	gpsInit();
 				continue;
 			}
 		}
-		nret = gpsGetPosition( &gpsData, 1000 );
+		nret = gpsGetPosition( &gpsData, 1200 );
 		if ( nret < 0 ){
 			dbgPrintf( "gpsGetPosition error nret = %d\r\n", nret );
 			continue;
@@ -917,7 +926,7 @@ j1:	gpsInit();
 				dbgPrintf( "Moving Base station init error nret=%d\r\n", nret );
 				while(1);
 			}
-			
+			mMBReady = true;
 			break;
 	}
 
@@ -1192,7 +1201,10 @@ void dispRoverMainPage()
 			if (mGpsRelPos[i].quality == 4 ) fix = 2;
 			else if (mGpsRelPos[i].quality == 5 ) fix = 1;
 			lineStart = i * 4;
-			double elevation = atan2( -mGpsRelPos[i].down, mGpsRelPos[i].length ) * RAD2DEG;
+			double length = mGpsRelPos[i].length;
+			double value = 0;
+			if ( length > 1E-2 ) value = -mGpsRelPos[i].down / length;
+			double elevation = asin( value ) * RAD2DEG;
 			lcdDispText( lineStart++, "LENGTH%d=%.3lfm     \r\n", n, mGpsRelPos[i].length );
 			lcdDispText( lineStart++, "HEADING%d=%.1lfdeg    \r\n", n, mGpsRelPos[i].heading);
 			lcdDispText( lineStart++, "ELEVATION%d=%.1lfdeg   \r\n", n, elevation );
@@ -1431,10 +1443,12 @@ void taskRover(void* param)
 	char buff[256];
 	int f9pInterface;
 	double x,y,z;
+	struct stGpsData gpsData;
 
 j1:	
 
-	int msecGpsCheck = 20;
+//	int msecGpsCheck = 20;
+	int msecGpsCheck = 2;
 	if (millis() - mGpsLastMillis > msecGpsCheck){
 		mGpsLastMillis = millis();
 		bool updated = false;
@@ -1466,12 +1480,10 @@ j1:
 			}
 			int msgClass = mUbxStatus[i].msgClass;
 			int msgId = mUbxStatus[i].msgId;
-//if ( msgClass == 0x02 && msgId == 0x15 ) dbgPrintf("RAWX status=%d\r\n",mUbxStatus[i].statusNum);
 			if ( mUbxStatus[i].statusNum != 10 ) {
 				i++;
 				continue;
 			}
-
 			// UBX PVT(Position Velocity Time)のデコード
 			if ( msgClass == 0x01 && msgId == 0x07  ){ // NAV-PVT
 				
@@ -1481,16 +1493,6 @@ j1:
 				
 				nret = ubxDecodeNavPvt( &mUbxStatus[i], &mGpsData[i] );
 				mUbxStatus[i].statusNum = 0;
-				
-/*				
-int nn = mUartWriteIndex - mUartReadIndex;
-	struct stDateTime time;
-	getDateTime( &time );
-
-if ( i == 0 ){
-	dbgPrintf( "%d %d-%d-%d %d:%d:%d:%d\r\n", nn,time.year,time.month,time.day,time.hour,time.minute,time.second,time.msec);
-}
-*/
 				
 				// 高精度座標値の取得
 				unsigned long msecStart = millis();
@@ -1507,7 +1509,7 @@ if ( i == 0 ){
 					}
 				}
 			
-				// 受信データの保存、配信、表示
+				// 受信データ（絶対位置）の保存、配信、表示
 				if ( mGpsData[i].ubxDone ){
 					updated = true;
 					mGpsData[i].receiverNum = i;
@@ -1548,7 +1550,6 @@ if ( i == 0 ){
 								}
 							}
 						}
-					//	nret = sdSave( i );
 					}
 					
 					// TCP Serverとしての配信
@@ -1585,7 +1586,6 @@ if ( i == 0 ){
 						struct stGpsData *pd1 = &mGpsData[1];
 						float secDiff = ( pd1->hour * 3600 + pd1->minute * 60 + pd1->second + pd1->msec / 1000.0 ) - ( pd0->hour * 3600 + pd0->minute * 60 + pd0->second + pd0->msec / 1000.0 );
 						int msecDiff = secDiff * 1000;
-//dbgPrintf("msecDiff=%d\r\n",msecDiff);
 						bool sameTimes = abs( msecDiff ) < ( 500 / mSolutionRate ) ;
 						if ( sameTimes ){
 							getPosVector( &mGpsData[0], &mGpsData[1], &x, &y, &z );
@@ -1597,7 +1597,6 @@ if ( i == 0 ){
 								if ( azimuth < 0 ) azimuth += 360;
 								elevation = (atan2( z, sqrt(x * x + y * y) )) * RAD2DEG;
 							}
-//dbgPrintf("dist=%f azimuth=%f elevation=%f\r\n",dist,azimuth,elevation );
 						}
 					}
 
@@ -1606,9 +1605,50 @@ if ( i == 0 ){
 			}
 			
 			// UBX RELPOSNED(Relative Positioning Information in NED frame)のデコード
-			if ( msgClass == 0x01 && msgId == 0x3C  ){ // NAV-RELPOSNED
+			if ( msgClass == 0x01 && msgId == 0x3C && i > 0 ){ // NAV-RELPOSNED
 				memset( &mGpsRelPos[i], 0, sizeof( stGpsRelPos ) );
 				nret = ubxDecodeNavRelPosNed( &mUbxStatus[i], &mGpsRelPos[i] );
+				
+				// 受信データ(相対位置）の保存、配信、表示
+				if ( mGpsRelPos[i].ubxDone ){
+					updated = true;
+					
+					// NMEAデータの作成
+					memcpy( &gpsData, &mGpsData[i], sizeof( gpsData ) );
+					copyRelPos2GpsData( i, &mGpsRelPos[i], &gpsData );
+					numOutBytes = setNmeaDataRelPos( i, &gpsData, mSaveBuff, SAVE_BUFF_MAX );
+dbgPrintf("setNmeaDataRelPos() i=%d\r\n",i);
+
+					// NMEAデータの配信
+
+					// シリアルポートからの配信
+					if ( mDebugPort != DEBUG_PH ) phUartWriteBytes( (byte *)mSaveBuff, numOutBytes );
+
+					// SDカードへ保存
+					if ( mFileSaving && mQueueFileSave && mSaveFormat == SAVE_NMEA){
+						BaseType_t qret;
+						qret = xQueueSend( mQueueFileSave, &gpsData, 0 );
+						if ( qret != pdPASS ){
+							mQueueFileErrorCount++;
+						} 
+					}
+					
+					// TCP Serverとしての配信
+					if ( mWifiServer ){
+						int residue = numOutBytes;
+						char* pRead = mSaveBuff;
+						while( residue > 0 ){
+							int n = residue;
+							if ( mServerWriteIndex + n > SERVER_BUFF_MAX )
+								n = SERVER_BUFF_MAX - mServerWriteIndex;
+							memcpy( mServerBuff + mServerWriteIndex, pRead, n );
+							mServerWriteIndex += n;
+							pRead += n;
+							if ( mServerWriteIndex >= SERVER_BUFF_MAX ) mServerWriteIndex = 0;
+							residue -= n;
+						}
+					}
+				}
 			}
 			
 			// UBX RAWX or SFRBX
@@ -1632,6 +1672,24 @@ if ( i == 0 ){
 	}
 	else vTaskDelay(5);
 	goto j1;
+}
+
+// 相対位置データを絶対位置データに上書きする。
+//
+// ・データ保存の
+
+void copyRelPos2GpsData( int receiverNum, struct stGpsRelPos *pRel, struct stGpsData *pData )
+{
+	pData->ubxDone = pRel->ubxDone;
+	pData->receiverNum = -receiverNum;
+	pData->iTOW = pRel->iTOW;
+	pData->micros = pRel->micros;
+	pData->lat = pRel->north;
+	pData->lon = pRel->east;
+	pData->height = pRel->down;
+	pData->geoidSep = pRel->length;
+	pData->direction = pRel->heading;
+	pData->quality = pRel->quality;
 }
 
 
@@ -2047,30 +2105,31 @@ void taskGetSensorData(void* param)
 		int numBytesToRead = Serial1.available();
 		if ( numBytesToRead > 0 ){
 			// 基準局の場合
-			if ( (mOpeMode == MODE_BASE && mRtcmXferReady) || mOpeMode == MODE_MOVING_BASE ){
+			if ( (mOpeMode == MODE_BASE && mRtcmXferReady) || 
+			     (mOpeMode == MODE_MOVING_BASE && mMBReady) ){
 				
 				// データの取得
 				// msecTimeoutの時間内に受信したデータをバッファに格納
 				unsigned long msecStart = millis();
 				int msecTimeout = 100;	// 100msec程度ないとPH UART送信時にエラーとなる
-				if ( mOpeMode == MODE_MOVING_BASE ) msecTimeout = 60;
+				if ( mOpeMode == MODE_MOVING_BASE ) msecTimeout = 70;  // 70以下だと4072.0が欠落する
 				mRtcmIndex = 0;
 				while( (millis() - msecStart) < msecTimeout ){
 					if ( numBytesToRead > 0 ){
 						if ( numBytesToRead + mRtcmIndex > RTCM_BUFF_MAX ) 
 									numBytesToRead = RTCM_BUFF_MAX - mRtcmIndex;
-						numSavedBytes = Serial1.readBytes( mRtcmBuff + mRtcmIndex, numBytesToRead );
-						mRtcmIndex += numSavedBytes;
+						numSavedBytes = Serial1.readBytes( mRtcmBuff + mRtcmIndex, numBytesToRead );						mRtcmIndex += numSavedBytes;
 						if ( mRtcmIndex >= RTCM_BUFF_MAX ) break;
 					}
 					vTaskDelay(1);
 					numBytesToRead = Serial1.available();
 				}
+				if ( mRtcmIndex == 0 ) continue;
 				
 				mServerCounter++;
 
 				// TCP転送用バッファにコピー
-				if ( mWifiServer ){
+				if ( mWifiServer && ! ( mOpeMode == MODE_MOVING_BASE && mMBTcpServerFormat == MB_NMEA ) ){
 					int residue = mRtcmIndex;
 					byte* pRead = mRtcmBuff;
 					while( residue > 0 ){
@@ -2102,12 +2161,6 @@ void taskGetSensorData(void* param)
 					ringBuffCopy( mRtcmBuff, mRtcmIndex, m920SendBuff, 
 													&m920SendWriteIdx, MODEM920_SEND_BUFF_MAX );
 					m920SendCount++;
-dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
-//					nret = mFep01.send( 2, (char*) mRtcmBuff, mRtcmIndex );
-//					m920SendCount++;
-//					if ( nret != mRtcmIndex ){
-//						dbgPrintf("Modem 920MHz send error in=%d out=%d\r\n", mRtcmIndex, nret);
-//					}
 				}
 
 				// 補正データをサブ受信機に配信
@@ -2119,8 +2172,10 @@ dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
 				}
 				
 				// シリアルポートからの配信
-				if ( mDebugPort != DEBUG_PH )phUartWriteBytes( mRtcmBuff, mRtcmIndex );
-
+				// Moving baseの場合は出力しない。出力すると５Hzの更新ができない。
+				if ( mDebugPort != DEBUG_PH ) {
+					if ( mOpeMode == MODE_BASE ) phUartWriteBytes( mRtcmBuff, mRtcmIndex );
+				}
 			}
 			else {	// 移動局の場合
 				unsigned long msecStart = millis();
@@ -2131,7 +2186,6 @@ dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
 					if ( buffResidue < numBytesToRead ) numBytesToRead = buffResidue;
 					numSavedBytes = Serial1.readBytes( savePointer, numBytesToRead );
 					if ( numSavedBytes == numBytesToRead ){
-//gpsCheckRtcm( savePointer, numSavedBytes );
 						mUartWriteIndex += numSavedBytes;
 						if ( mUartWriteIndex == UART_BUFF_MAX ) mUartWriteIndex = 0;
 						else if ( mUartWriteIndex > UART_BUFF_MAX ){
@@ -2151,7 +2205,6 @@ dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
 		else {
 			if ( mI2cUartSyncMode ) continue;
 		}
-		
 
 		// I2C
 		if ( mNumI2cReceivers == 0 ) continue;
@@ -2167,7 +2220,9 @@ dbgPrintf("920 write bytes=%d\r\n",mRtcmIndex);
 				int i2cAddress = mReceiverType[i];
 				if ( i2cAddress ){
 					numBytesToRead = f9pI2cNumBytes( i2cAddress );
-					if ( numBytesToRead == 0 ) continue;
+					if ( numBytesToRead == 0 ){
+						continue;
+					}
 					while ( numBytesToRead > 0 && numBytesToRead != 65535 ){
 						savePointer = (byte*) mI2cBuff[i] + mI2cWriteIndex[i];
 						numSavedBytes = f9pI2cReadBytes( i2cAddress, numBytesToRead, savePointer,
@@ -2590,6 +2645,10 @@ int readIniFile( IniFile *iniFile )
 	strcpy( section, "surveyin" );
 	mSurveyinSec = iniFile->readInt( section, "period", mSurveyinSec );
 	mSurveyinAccuracy = iniFile->readDouble( section, "accuracy", mSurveyinAccuracy );
+	
+	// Moving base動作時のTCP Serverの配信フォーマット
+	strcpy( section, "movingbase" );
+	mMBTcpServerFormat = iniFile->readInt( section, "tcpformat", MB_RTCM );
 
 	// Google key
 	nret = iniFile->readValue( "google", "key", buff, 256 );
@@ -3412,7 +3471,6 @@ int movingBaseInit()
 	if ( nret < 0 ) return -1;
 
 	// RTCM message
-dbgPrintf("moving base 0xF5 0x4d\r\n");
 	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x4D, 1 );	// RTCM3.3 1077 GPS MSM7
 	if ( nret < 0 ) return -2;
 	nret = gpsSetMessageRate( IF_UART, 0xF5, 0x57, 1 );	// RTCM3.3 1087 GLONASS MSM7
@@ -3616,6 +3674,8 @@ int gpsGetPosition( struct stGpsData *gpsData, int msecTimeout )
 	while(1){
 		if ( millis() - msecStart > msecTimeout ) break;
 		int nret = ubxDecode( IF_UART, &ubxStatus );
+dbgPrintf( "status=%d\r\n",ubxStatus.statusNum );
+delay(100);
 		if ( nret == 0 && ubxStatus.statusNum == 10 ){
 			int msgClass = ubxStatus.msgClass;
 			int msgId = ubxStatus.msgId;
@@ -4311,6 +4371,7 @@ int sdSave(int receiverNum, struct stGpsData *pGpsData)
 	int nret;
 	char buff[256];
 	int i = receiverNum;
+	if ( i < 0 ) i = -i;
 	if ( strlen( mSaveFileName[i] ) == 0 ){
 		int year = mGpsData[i].year;
 		int month = mGpsData[i].month;
@@ -4327,7 +4388,10 @@ int sdSave(int receiverNum, struct stGpsData *pGpsData)
 		}
 	}
 	
-	int numOutBytes = setNmeaData( pGpsData, buff, 256 );
+	int numOutBytes = 0;
+	if ( receiverNum >= 0 ) numOutBytes = setNmeaData( pGpsData, buff, 256 );
+	else numOutBytes = setNmeaDataRelPos( i, pGpsData, buff, 256 );
+	
 	if ( numOutBytes > 0 ){
 		char* p = mSdBuff[i];
 
@@ -4563,6 +4627,39 @@ int setNmeaData( struct stGpsData* pGpsData, char* buff, int buffSize )
 	return strlen( buff );
 }
 
+// 相対位置座標をNMEAのプライベートセンテンスとしてバッファに格納
+//
+// ・相対位置座標はstGpsDataの共用データ部分にコピーしておく
+//
+// 戻り値＝バッファに保存したデータのバイト数
+//
+int setNmeaDataRelPos( int receiverNum, struct stGpsData* pGpsData, char* buff, int buffSize )
+{
+	if ( buffSize < 150 ) return -1;	// 150：RMC,GGAに必要なバイト数
+	
+	int hour = pGpsData->hour;
+	int minute = pGpsData->minute;
+	int second = pGpsData->second;
+	int msec = pGpsData->msec;
+	double north = pGpsData->lat;
+	double east = pGpsData->lon;
+	double down = pGpsData->height;
+	double length = pGpsData->geoidSep;
+	double heading = pGpsData->direction;
+	double value = 0;
+	if ( length > 1E-2 ) value = -down / length;
+	double elevation = asin( value ) * RAD2DEG;
+	int quality = pGpsData->quality;
+	
+	// Geosense proprietary sentense
+	sprintf( buff, "$PGEO,NED,%d,%02d%02d%02d.%03d,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%d",
+					receiverNum, hour, minute, second, msec, north, east, down, length, heading, elevation, quality );
+	unsigned char csum = checksumOf( buff + 1, strlen( buff ) - 1 );
+	sprintf( buff + strlen( buff ), "*%02x\r\n", csum );
+
+	return strlen( buff );
+}
+
 
 double deg2degmin( double degree )
 {
@@ -4741,3 +4838,20 @@ void dbgHeapSize(char *message)
 {
 	dbgPrintf("Heap Size %s = %d\r\n", message, esp_get_free_heap_size());
 }
+
+void dbgPulse( int numPulse, int usecWidth )
+{
+	digitalWrite( mPinTest, LOW);
+	for ( int i=0; i < numPulse; i++ )
+	{
+		digitalWrite( mPinTest, HIGH );
+		unsigned long usecStart = micros();
+		while( micros() - usecStart < usecWidth );
+		digitalWrite( mPinTest, LOW );
+		if ( numPulse == 1 ) break;
+
+		usecStart = micros();
+		while( micros() - usecStart < usecWidth );
+	}
+}
+

@@ -13,10 +13,15 @@ typedef short s16;
 typedef unsigned short u16;
 typedef unsigned char u8;
 
+// 測位データ格納用
+// 
+// ファイル保存等のためキューに入れる場合、相対位置（stGpsRelPos）の構造体と
+// 共用する。receiverNumが負の場合は位置はNED座標の相対位置データが格納される。
+//
 struct stGpsData
 {
 	bool ubxDone;
-	int receiverNum;
+	int receiverNum;		// レシーバ番号。負の場合はstGpsRelPosのデータが格納されている
 	unsigned int iTOW;
 	bool highPrecisionDone;
 //	unsigned long millis;
@@ -28,12 +33,12 @@ struct stGpsData
 	int minute;
 	int second;
 	int msec;
-	double lat;
-	double lon;
-	double height;
-	double geoidSep; // geoid separation
+	double lat;		// [stGpsRelPos: north]
+	double lon;		// [stGpsRelPos: east]
+	double height;	// [stGpsRelPos: down]
+	double geoidSep; // geoid separation  [stGpsRelPos: length]
 	double velocity;	// km/h
-	double direction;	// 0-360 deg
+	double direction;	// 0-360 deg	[stGpsRelPos: heading]
 	int quality;		// 0 = No fix, 1 = Autonomous GNSS fix, 
 						// 2 = Differential GNSS fix, 4 = RTK fixed, 
 						// 5= RTK float, 6 = Estimated/Dead reckoning fix:
