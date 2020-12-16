@@ -59,7 +59,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 byte mVersionMajor = 1;
 byte mVersionMinor = 0;
-byte mVersionPatch = 18;
+byte mVersionPatch = 19;
 
 int mCpuFreqMHz;
 
@@ -360,8 +360,8 @@ int mNumI2cReceivers;
 //
 unsigned long mGpsLastMillis;
 int mSolutionRate;
-int mGpsUartBaudrate = 230400;		// 460800,230400,115200,57600,38400,19200,9600
-//int mGpsUartBaudrate = 460800;		// 460800,230400,115200,57600,38400,19200,9600
+//int mGpsUartBaudrate = 230400;		// 460800,230400,115200,57600,38400,19200,9600
+int mGpsUartBaudrate = 460800;		// 460800,230400,115200,57600,38400,19200,9600
 
 int mI2cUartSyncMode;		// I2Cのデータ読み出しをUARTに同期させる場合 true
 
@@ -2118,7 +2118,16 @@ void taskGetSensorData(void* param)
 					if ( numBytesToRead > 0 ){
 						if ( numBytesToRead + mRtcmIndex > RTCM_BUFF_MAX ) 
 									numBytesToRead = RTCM_BUFF_MAX - mRtcmIndex;
-						numSavedBytes = Serial1.readBytes( mRtcmBuff + mRtcmIndex, numBytesToRead );						mRtcmIndex += numSavedBytes;
+						numSavedBytes = Serial1.readBytes( mRtcmBuff + mRtcmIndex, numBytesToRead );
+						// 補正データをサブ受信機に配信
+						if ( mNumI2cReceivers ){
+							nret = gpsWrite( IF_UART, (char *)(mRtcmBuff + mRtcmIndex), numSavedBytes );
+							if ( nret != numSavedBytes ){
+								dbgPrintf("gpsWrite() error in=%d out=%d\r\n", mRtcmIndex, nret);
+							}
+						}
+						
+						mRtcmIndex += numSavedBytes;
 						if ( mRtcmIndex >= RTCM_BUFF_MAX ) break;
 					}
 					vTaskDelay(1);
@@ -2163,13 +2172,6 @@ void taskGetSensorData(void* param)
 					m920SendCount++;
 				}
 
-				// 補正データをサブ受信機に配信
-				if ( mNumI2cReceivers ){
-					nret = gpsWrite( IF_UART, (char *)mRtcmBuff, mRtcmIndex );
-					if ( nret != mRtcmIndex ){
-						dbgPrintf("gpsWrite() error in=%d out=%d\r\n", mRtcmIndex, nret);
-					}
-				}
 				
 				// シリアルポートからの配信
 				// Moving baseの場合は出力しない。出力すると５Hzの更新ができない。
@@ -3603,9 +3605,13 @@ j1:	M5.Lcd.println("ZED-F9P I2C");
 		if ( f9pInterface == 0 ) continue;
 
 		// output UBX only
-		if ( f9pInterface == IF_UART )
+		if ( f9pInterface == IF_UART ){
 			// input ubx:1 nmea:1 rtcm:1   output ubx:1 nmea:0 rtcm:0
 			nret = gpsSetUartPort( f9pInterface, 1, mGpsUartBaudrate, 1, 1, 1, 1, 0, 0 );
+
+			// input ubx:0 nmea:0 rtcm:0   output ubx:1 nmea:0 rtcm:0
+			nret = gpsSetI2cPort( 0x42, 0, 0, 0, 1, 0, 0 );
+		}
 		else {	// I2C : UART RTCM only input
 			// input ubx:0 nmea:0 rtcm:1   output ubx:1 nmea:0 rtcm:0
 			nret = gpsSetUartPort( f9pInterface, 1, mGpsUartBaudrate, 0, 0, 1, 1, 0, 0 );
