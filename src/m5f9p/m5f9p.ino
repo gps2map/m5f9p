@@ -59,7 +59,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 byte mVersionMajor = 1;
 byte mVersionMinor = 0;
-byte mVersionPatch = 19;
+byte mVersionPatch = 20;
 
 int mCpuFreqMHz;
 
@@ -121,6 +121,7 @@ int mRebootMode = RUN_UI;
 // 実行パラメータ
 #define RUN_INFO_STR_MAX 10
 struct stRunInfo {
+	int bootMode;		// 通常ブートの際、直前の動作モードで実行する時１。UIで選択する時0．
 	int rebootMode;		// 異常リブートの際、直前の動作モードで実行する時１。UIで選択する時0．
 	int lcdRotation;	// 画面の向き 0:回転無 1:180度回転
 	int netAccess;		// ネット接続　1:WIFI 2:3G 3:920MHz
@@ -495,9 +496,6 @@ void setup() {
 	sprintf( buff + strlen(buff), "Version: %d.%d.%d\r\n", mVersionMajor, mVersionMinor, mVersionPatch );
 
 
-// ＞＞＞　　ブート原因にかかわらず自動実行できるようにする。
-// ＞＞＞　　最初の３秒間にボタンを押すとUIモードで実行
-
 	// ブート原因
 	int resetReason0 = rtc_get_reset_reason(0);
 	int resetReason1 = rtc_get_reset_reason(1);
@@ -509,6 +507,16 @@ void setup() {
 	
 	// Runモード
 	mRunMode = RUN_UI;
+	nret = readRunInfo( &mRunInfo );
+	if ( nret == sizeof( mRunInfo ) ){
+		mRunMode = mRunInfo.bootMode;
+		if ( mRunMode == 0 && abnormalReset ) mRunMode = mRunInfo.rebootMode;
+	}
+
+
+/*
+	// Runモード
+	mRunMode = RUN_UI;
 	if ( abnormalReset ){
 		nret = readRunInfo( &mRunInfo );
 		if ( nret == sizeof( mRunInfo ) ){
@@ -516,6 +524,7 @@ void setup() {
 			dbgPrintf( "Abnormal reset mRunMode=%d\r\n", mRunMode );
 		}
 	}
+*/
 	
 	// ZED-F9Pをリセット
 	Wire.begin();
@@ -742,6 +751,10 @@ j1:	gpsInit();
 				lcdDispText( 2, ">>> Testing the ZED-F9P receiver" );
 				continue;
 			}
+		}
+		else {
+			M5.update();
+			if ( M5.BtnB.wasReleased() ) break;
 		}
 		nret = gpsGetPosition( &gpsData, 1200 );
 		if ( nret < 0 ){
@@ -1031,9 +1044,10 @@ j1:	gpsInit();
 #define PAGE_MAIN 0
 #define PAGE_MAP 1
 #define PAGE_INFO 2
+#define PAGE_BOOTINFO 3
 
 int mLcdPage;		// 画面に表示するページ番号
-int mLcdPageMax = 3;	// 総ページ数
+int mLcdPageMax = 4;	// 総ページ数
 
 #define MAP_ROAD 0
 #define MAP_SAT 1
@@ -1091,6 +1105,9 @@ void loopBase(){
 		case PAGE_INFO:
 			dispInfo();
 			break;
+		case PAGE_BOOTINFO:
+			dispBootInfo();
+			break;
 	}
 	
 }
@@ -1108,6 +1125,9 @@ void loopRover()
 			break;
 		case PAGE_INFO:
 			dispInfo();
+			break;
+		case PAGE_BOOTINFO:
+			dispBootInfo();
 			break;
 	}
 	
@@ -1254,8 +1274,10 @@ void dispRoverMainPage()
 			else {
 				for( int i=0; i < RECEIVER_MAX; i++ ) strcpy( mSaveFileName[i], "" );
 			}
-			mRunInfo.saving = mFileSaving;
-			saveRunInfo( &mRunInfo );
+			if ( mRunInfo.bootMode == 0 ){
+				mRunInfo.saving = mFileSaving;
+				saveRunInfo( &mRunInfo );
+			}
 		}
 		else {
 			lcdClear();
@@ -1282,6 +1304,109 @@ void dispRoverMainPage()
 //	dbgPrintf("Gyro x=%.3f y=%.3f z=%.3f Accel x=%.3f y=%.3f z=%.3f\r\n",
 //				mGyroX,mGyroY,mGyroZ,mAccelX,mAccelY,mAccelZ );
 
+}
+
+void dispBootInfo() 
+{
+	int nret;
+	char buff[256];
+	char* netStr[4] = { "None", "Wifi", "3G", "920MHz" };
+	char* opeStr[3] = { "Rover", "Base", "Moving base" };
+	char* saveStr[3] = { "NMEA", "RAW", "RTCM" };
+	char* bootStr;
+	char* onoffStr;
+
+	lcdDispButtonText( 2, WHITE, "BootMode", "Save", "NextPage", false );
+	int lineStart = 0;
+	lcdDispText( lineStart++, " *** Boot info ***" );
+
+	int angle = 0;
+	if ( mRunInfo.lcdRotation == 1 ) angle = 180;
+	lcdDispText2( lineStart++, "Lcd rotation = ", "%d deg", angle );
+	
+	int i = mRunInfo.netAccess;
+	if ( i >=0 && i < 4 )
+		lcdDispText2( lineStart++, "Net access = ", "%s", netStr[i] );
+	if (  mRunInfo.netAccess == 1 ){
+		i = mRunInfo.wifiAp;
+		if ( i > 0 && i < WIFI_MAX )
+			lcdDispText2( lineStart++, "Ssid = ", "%s", mWifiList[i-1].ssid );
+	}
+	
+	i = mRunInfo.opeMode;
+	if ( i > 0  && i < 4 ) {
+		i--;
+		lcdDispText2( lineStart++, "Operation mode = ", "%s", opeStr[i] );
+	}
+	
+	if ( mRunInfo.opeMode == 1 ){	// rover
+		i = mRunInfo.baseSrc - 1;
+		strcpy( buff, "Uart" );
+		if ( i >= 0 && i < BASE_SRC_MAX ){
+			 strcpy( buff, mBaseSrcList[i].address );
+			 strcat( buff, "/" );
+			 strcat( buff, mBaseSrcList[i].mountPoint );
+		}
+		lcdDispText2( lineStart++, "Base source = ", "%s", buff );
+		lineStart++;
+	}
+	else if ( mRunInfo.opeMode == 2 ){	// base
+		lcdDispText2( lineStart++, "Base position = ", "%s", mRunInfo.basePositionName );
+		
+		onoffStr = "Off";
+		if ( mRunInfo.baseSend ) onoffStr = "On";
+		lcdDispText2( lineStart++, "Send to NTRIP caster = ", "%s", onoffStr );
+	}
+	
+	i = mRunInfo.saveFormat;
+	if ( i >= 0 && i < 3 ){
+		lcdDispText2( lineStart++, "Save format = ", "%s", saveStr[i] );
+	}
+	
+	lcdDispText2( lineStart++, "Solution rate = ", "%dHz", mRunInfo.solutionRate );
+	
+	lineStart++;
+
+	bootStr = "step by step";
+	if ( mRunInfo.bootMode == 1 ) bootStr = "nonstop     ";
+	lcdDispText2( lineStart++, "Boot mode = ", "%s", bootStr );
+	
+	onoffStr = "Off";
+	if ( mRunInfo.saving ) onoffStr = "On ";
+	lcdDispText2( lineStart++, "Save to file = ", "%s", onoffStr );
+
+	// ボタンが押された時の処理
+	if ( buttonAPressed() ){
+		mRunInfo.bootMode++;
+		if ( mRunInfo.bootMode > 1 ) mRunInfo.bootMode = 0;
+		saveRunInfo( &mRunInfo );
+	}
+
+	if ( buttonBPressed() ){
+		mRunInfo.saving++;
+		if ( mRunInfo.saving > 1 ) mRunInfo.saving = 0;
+		saveRunInfo( &mRunInfo );
+	}
+
+/*
+	int buttonB = buttonBPressed();
+	if ( buttonB ){
+		int pitch = 1;
+		if ( buttonB == 2 ) pitch = 5;
+		if ( mSolutionRate == 1 && pitch == 5 ) mSolutionRate = pitch;
+		else {
+			mSolutionRate += pitch;
+			if ( mSolutionRate > 20 ) mSolutionRate = 1;
+		}
+		gpsSetSolutionRate( mSolutionRate );
+		mRunInfo.solutionRate = mSolutionRate;
+		saveRunInfo( &mRunInfo );
+	}
+	
+//	dbgPrintf("Gyro x=%.3f y=%.3f z=%.3f Accel x=%.3f y=%.3f z=%.3f\r\n",
+//				mGyroX,mGyroY,mGyroZ,mAccelX,mAccelY,mAccelZ );
+
+*/
 }
 
 int gpsSetSolutionRate( int rate )
@@ -1617,7 +1742,6 @@ j1:
 					memcpy( &gpsData, &mGpsData[i], sizeof( gpsData ) );
 					copyRelPos2GpsData( i, &mGpsRelPos[i], &gpsData );
 					numOutBytes = setNmeaDataRelPos( i, &gpsData, mSaveBuff, SAVE_BUFF_MAX );
-dbgPrintf("setNmeaDataRelPos() i=%d\r\n",i);
 
 					// NMEAデータの配信
 

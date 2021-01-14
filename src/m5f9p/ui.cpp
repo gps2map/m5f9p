@@ -144,6 +144,26 @@ void lcdDispText( int lineNum, char* format, ... )
 	M5.Lcd.printf( buff );
 }
 
+//
+// greenText = GREEN
+// format Text = WHITE
+//
+void lcdDispText2( int lineNum, char* greenText, char* format, ... )
+{
+	char buff[256];
+	va_list args;
+	va_start( args, format );
+	vsprintf( buff, format, args );
+	va_end( args );
+	if ( mLcdRotation == 3 ) lineNum += 1;
+	if ( lineNum >= 0 ) M5.Lcd.setCursor( 0, lineNum * mTextSize * 8 );
+
+	lcdTextColor( GREEN );
+	M5.Lcd.printf( greenText );
+	lcdTextColor( WHITE );
+	M5.Lcd.printf( buff );
+}
+
 // LCDの文字の大きさを設定する。
 // 
 // textSize: 1～3　　

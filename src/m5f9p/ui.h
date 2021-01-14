@@ -16,6 +16,7 @@ void speakerOff();
 int lcdInit( int setRotation );
 int lcdInit( int setRotation, char *message );
 void lcdDispText( int lineNum, char* format, ... );
+void lcdDispText2( int lineNum, char* greenText, char* format, ... );
 void lcdTextSize( int textSize );
 void lcdClear( int color );
 int lcdGetColor16( int color24 );
